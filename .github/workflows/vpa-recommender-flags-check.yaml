@@ -1,0 +1,88 @@
+name: VPA recommender flag integration check
+
+on:
+  push:
+    branches:
+      - ci-recommender-name-check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # All recommender flag tests against the unmodified recommender.
+          - variant: all-recommender-flag-tests
+            focus: '\[VPA\] \[recommender\]'
+            break_filter: 'false'
+          # Same suite run a second time to catch flakiness.
+          - variant: all-recommender-flag-tests-rerun
+            focus: '\[VPA\] \[recommender\]'
+            break_filter: 'false'
+          # The new test against a recommender whose VPA filtering by name is
+          # broken. This run is EXPECTED TO FAIL.
+          - variant: expected-failure-broken-name-filter
+            focus: 'recommender-name'
+            break_filter: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: vertical-pod-autoscaler/go.mod
+          cache-dependency-path: |
+            vertical-pod-autoscaler/go.sum
+            vertical-pod-autoscaler/test/go.sum
+
+      - name: Break recommender name filtering
+        if: matrix.break_filter == 'true'
+        working-directory: vertical-pod-autoscaler
+        run: |
+          perl -0pi -e 's/(\tfor _, vpaCRD := range allVpaCRDs \{\n)/$1\t\tvpaCRDs = append(vpaCRDs, vpaCRD)\n\t\tcontinue\n/' pkg/recommender/input/cluster_feeder.go
+          git diff --exit-code && { echo "patch did not apply"; exit 1; } || true
+          git diff
+
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@latest
+
+      - name: Create cluster
+        run: kind create cluster --config .github/kind-config.yaml
+
+      - name: Install VPA RBAC, CRDs and metrics-server
+        working-directory: vertical-pod-autoscaler
+        run: |
+          kubectl apply -f deploy/vpa-rbac.yaml
+          kubectl apply -f deploy/vpa-v1-crd-gen.yaml
+          helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+          helm repo update metrics-server
+          helm upgrade --install --set args={--kubelet-insecure-tls} metrics-server metrics-server/metrics-server --namespace kube-system --version 3.13.0 --wait
+
+      - name: Build and load recommender image
+        working-directory: vertical-pod-autoscaler
+        run: |
+          ALL_ARCHITECTURES=amd64 make --directory pkg/recommender docker-build REGISTRY=localhost:5001 TAG=latest
+          docker tag localhost:5001/vpa-recommender-amd64:latest localhost:5001/vpa-recommender:latest
+          kind load docker-image localhost:5001/vpa-recommender:latest
+
+      - name: Run integration tests
+        working-directory: vertical-pod-autoscaler/test
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: |
+          go test ./e2e/integration/ -v -timeout 50m -args \
+            --ginkgo.v --ginkgo.focus='${{ matrix.focus }}' \
+            --disable-log-dump --ginkgo.timeout=50m
+
+      - name: Recommender logs
+        if: always()
+        run: |
+          kubectl get pods -A
+          kubectl get vpa -A -o yaml || true
+          kubectl logs -n kube-system deploy/vpa-recommender --tail=300 || true
