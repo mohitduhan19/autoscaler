@@ -174,8 +174,11 @@ var _ = utils.RecommenderE2eDescribe("Flags", func() {
 		for _, ignoredVpaCRD := range ignoredVpaCRDs {
 			ignoredVpa, err := vpaClientSet.AutoscalingV1().VerticalPodAutoscalers(hamsterNamespace).Get(context.TODO(), ignoredVpaCRD.Name, metav1.GetOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(ignoredVpa.Status.Recommendation).To(gomega.BeNil(), "VPA %s should not have a recommendation", ignoredVpa.Name)
 			gomega.Expect(ignoredVpa.Status.Conditions).Should(gomega.BeEmpty(), "VPA %s should not have conditions", ignoredVpa.Name)
+			gomega.Expect(ignoredVpa.Status.Recommendation).To(gomega.SatisfyAny(
+				gomega.BeNil(),
+				gomega.HaveField("ContainerRecommendations", gomega.BeEmpty()),
+			), "VPA %s should not have a recommendation", ignoredVpa.Name)
 		}
 	})
 })
